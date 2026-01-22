@@ -2,6 +2,18 @@
 name = "acacia"
 version = "0.1.0"
 edition = "2021"
+authors = ["0xpanicError <theyashsaraswat@gmail.com>"]
+description = "BTT Test Tree Generator for Solidity Smart Contracts"
+documentation = "https://github.com/0xpanicError/acacia#readme"
+repository = "https://github.com/0xpanicError/acacia"
+license = "MIT"
+keywords = ["solidity", "ethereum", "testing", "foundry", "btt"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = ["testdata/*", "tests/*"]
+
+[[bin]]
+name = "acacia"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
@@ -10,3 +22,8 @@ thiserror = "1.0"
 walkdir = "2.4"
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

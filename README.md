@@ -6,16 +6,35 @@ Acacia analyzes Solidity functions and generates [Branching Tree Technique (BTT)
 
 ## Installation
 
+### From crates.io (Recommended)
+
 ```bash
-# Clone the repository
+cargo install acacia
+```
+
+### From Source
+
+```bash
 git clone https://github.com/your-org/acacia.git
 cd acacia
+cargo install --path .
+```
 
-# Build the release binary
-cargo build --release
+### Pre-built Binaries
 
-# (Optional) Add to PATH
-cp target/release/acacia /usr/local/bin/
+Download from [GitHub Releases](https://github.com/your-org/acacia/releases):
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | `acacia-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `acacia-x86_64-apple-darwin.tar.gz` |
+| Linux (x64) | `acacia-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows (x64) | `acacia-x86_64-pc-windows-msvc.zip` |
+
+```bash
+# Example: macOS Apple Silicon
+curl -L https://github.com/your-org/acacia/releases/latest/download/acacia-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv acacia /usr/local/bin/
 ```
 
 ## Quick Start
@@ -59,7 +78,7 @@ Acacia follows Paul R. Berg's BTT specification:
 - **"it should revert"** - Revert outcome
 - **"it should succeed"** - Happy path outcome
 
-## Examples
+## Example
 
 ### Input: Solidity Contract
 
@@ -97,33 +116,25 @@ withdraw
             └── it should succeed
 ```
 
-## Usage in CI/CD
+## CI/CD Integration
 
 ```yaml
 # .github/workflows/test-trees.yml
-- name: Generate Test Trees
-  run: |
-    for contract in src/*.sol; do
-      name=$(basename "$contract" .sol)
-      acacia generate "${name}::*" || true
-    done
+- name: Install Acacia
+  run: cargo install acacia
 
-- name: Commit Updated Trees
-  run: |
-    git add test/trees/
-    git commit -m "chore: update test trees" || true
+- name: Generate Test Trees
+  run: acacia generate MyContract::withdraw
 ```
 
 ## Requirements
 
-- **Rust** 1.70+ (for building)
 - **Foundry Project** with `foundry.toml`
 
 ## Limitations
 
 - Does not trace into external contract calls (by design)
 - Function overloading not yet supported
-- Requires contracts to be in Foundry project structure
 
 ## License
 
