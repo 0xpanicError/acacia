@@ -76,6 +76,131 @@ pub fn generate_tree_for_function(contract_name: &str, function_name: &str) -> S
     })
 }
 
+/// Generate a BTT tree for a specific function overload by signature
+pub fn generate_tree_for_function_with_signature(
+    contract_name: &str,
+    function_name: &str,
+    signature: &str,
+) -> String {
+    let file_path = testdata_dir().join(format!("{}.sol", contract_name));
+
+    let sess = Session::builder().with_silent_emitter(None).build();
+
+    sess.enter(|| {
+        let arena = ast::Arena::new();
+        let mut parser =
+            Parser::from_file(&sess, &arena, &file_path).expect("Failed to create parser");
+
+        let source_unit = parser
+            .parse_file()
+            .map_err(|e| {
+                e.emit();
+            })
+            .expect("Failed to parse file");
+
+        let contract = find_contract(&source_unit, contract_name).expect("Contract not found");
+        let state_vars = extract_state_variables(contract);
+        let modifier_defs = extract_modifier_definitions(contract);
+
+        // Find function by signature
+        let function = find_function_by_signature(contract, function_name, signature)
+            .expect("Function with signature not found");
+
+        let params = extract_parameters(function);
+        let mut branch_points = Vec::new();
+
+        for modifier in function.header.modifiers.iter() {
+            let modifier_name = modifier.name.last().as_str();
+            if let Some((_, body)) = modifier_defs.iter().find(|(name, _)| name == modifier_name) {
+                if let Some(body) = body {
+                    extract_branch_points_from_block(
+                        body,
+                        &state_vars,
+                        &params,
+                        &mut branch_points,
+                        false,
+                    );
+                }
+            }
+        }
+
+        if let Some(body) = &function.body {
+            extract_branch_points_from_block(body, &state_vars, &params, &mut branch_points, false);
+        }
+
+        let tree = build_tree(function_name, branch_points);
+        render_tree(&tree)
+    })
+}
+
+/// Generate BTT trees for all overloads of a function, returning (signature, tree) pairs
+pub fn generate_trees_for_all_overloads(
+    contract_name: &str,
+    function_name: &str,
+) -> Vec<(String, String)> {
+    let file_path = testdata_dir().join(format!("{}.sol", contract_name));
+
+    let sess = Session::builder().with_silent_emitter(None).build();
+
+    sess.enter(|| {
+        let arena = ast::Arena::new();
+        let mut parser =
+            Parser::from_file(&sess, &arena, &file_path).expect("Failed to create parser");
+
+        let source_unit = parser
+            .parse_file()
+            .map_err(|e| {
+                e.emit();
+            })
+            .expect("Failed to parse file");
+
+        let contract = find_contract(&source_unit, contract_name).expect("Contract not found");
+        let state_vars = extract_state_variables(contract);
+        let modifier_defs = extract_modifier_definitions(contract);
+        let functions = find_all_functions_by_name(contract, function_name);
+
+        let mut results = Vec::new();
+
+        for function in functions {
+            let params = extract_parameters(function);
+            let signature = get_function_signature(function);
+            let mut branch_points = Vec::new();
+
+            for modifier in function.header.modifiers.iter() {
+                let modifier_name = modifier.name.last().as_str();
+                if let Some((_, body)) =
+                    modifier_defs.iter().find(|(name, _)| name == modifier_name)
+                {
+                    if let Some(body) = body {
+                        extract_branch_points_from_block(
+                            body,
+                            &state_vars,
+                            &params,
+                            &mut branch_points,
+                            false,
+                        );
+                    }
+                }
+            }
+
+            if let Some(body) = &function.body {
+                extract_branch_points_from_block(
+                    body,
+                    &state_vars,
+                    &params,
+                    &mut branch_points,
+                    false,
+                );
+            }
+
+            let tree = build_tree(function_name, branch_points);
+            results.push((signature, render_tree(&tree)));
+        }
+
+        results
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConditionContext {
     Storage,
@@ -145,6 +270,65 @@ fn find_function<'a>(
         }
     }
     None
+}
+
+fn find_all_functions_by_name<'a>(
+    contract: &'a ast::ItemContract<'a>,
+    name: &str,
+) -> Vec<&'a ast::ItemFunction<'a>> {
+    let mut functions = Vec::new();
+    for item in contract.body.iter() {
+        if let ItemKind::Function(func) = &item.kind {
+            if let Some(func_name) = &func.header.name {
+                if func_name.as_str() == name {
+                    functions.push(func);
+                }
+            }
+        }
+    }
+    functions
+}
+
+fn find_function_by_signature<'a>(
+    contract: &'a ast::ItemContract<'a>,
+    name: &str,
+    signature: &str,
+) -> Option<&'a ast::ItemFunction<'a>> {
+    for item in contract.body.iter() {
+        if let ItemKind::Function(func) = &item.kind {
+            if let Some(func_name) = &func.header.name {
+                if func_name.as_str() == name {
+                    let func_sig = get_function_signature(func);
+                    if func_sig == signature {
+                        return Some(func);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_function_signature(function: &ast::ItemFunction<'_>) -> String {
+    function
+        .header
+        .parameters
+        .iter()
+        .map(|p| type_to_string(&p.ty))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn type_to_string(ty: &ast::Type<'_>) -> String {
+    use ast::TypeKind::*;
+    match &ty.kind {
+        Elementary(elem) => format!("{}", elem),
+        Custom(path) => path.last().to_string(),
+        Array(type_array) => format!("{}[]", type_to_string(&type_array.element)),
+        Function(_) => "function".to_string(),
+        Mapping(_) => "mapping".to_string(),
+        _ => "unknown".to_string(),
+    }
 }
 
 fn extract_state_variables(contract: &ast::ItemContract<'_>) -> Vec<String> {

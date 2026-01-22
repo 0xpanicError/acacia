@@ -18,7 +18,7 @@ pub struct Cli {
 enum Commands {
     /// Generate a BTT-style test tree for a function
     Generate {
-        /// Target function in format ContractName::functionName
+        /// Target function in format ContractName::functionName or ContractName::functionName(args)
         #[arg(value_name = "TARGET")]
         target: String,
 
@@ -36,51 +36,154 @@ impl Cli {
     }
 }
 
-fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse target: ContractName::functionName
-    let (contract_name, function_name) = parse_target(target)?;
+/// Parsed target with optional signature for overload disambiguation
+struct ParsedTarget {
+    contract_name: String,
+    function_name: String,
+    /// Optional signature like "address,uint256" for specific overload
+    signature: Option<String>,
+}
 
-    println!(
-        "Generating BTT tree for {}::{}",
-        contract_name, function_name
-    );
+fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse target: ContractName::functionName or ContractName::functionName(args)
+    let parsed = parse_target(target)?;
 
     // 1. Discover Foundry project
     let project = FoundryProject::discover()?;
     println!("Found Foundry project at: {:?}", project.root());
 
     // 2. Find and parse the contract
-    let contract_path = project.find_contract(&contract_name)?;
+    let contract_path = project.find_contract(&parsed.contract_name)?;
     println!("Found contract at: {:?}", contract_path);
 
     // 3. Parse with Solar and extract branch points
     let parser = SolarParser::new(&project);
-    let function_ctx = parser.parse_function(&contract_path, &contract_name, &function_name)?;
 
-    println!("Found {} branch points", function_ctx.branch_points.len());
+    match parsed.signature {
+        Some(signature) => {
+            // Specific signature provided - generate single tree
+            println!(
+                "Generating BTT tree for {}::{}({})",
+                parsed.contract_name, parsed.function_name, signature
+            );
 
-    // 4. Build the tree
-    let tree = TreeBuilder::build(&function_name, function_ctx.branch_points)?;
+            let function_ctx = parser.parse_function_by_signature(
+                &contract_path,
+                &parsed.contract_name,
+                &parsed.function_name,
+                &signature,
+            )?;
 
-    // 5. Render and write output
-    let output_path =
-        std::path::Path::new(output_dir).join(format!("{}.{}.tree", contract_name, function_name));
+            println!("Found {} branch points", function_ctx.branch_points.len());
 
-    render_tree(&tree, &output_path)?;
+            let tree = TreeBuilder::build(&parsed.function_name, function_ctx.branch_points)?;
 
-    println!("Generated tree at: {:?}", output_path);
+            // Include signature in filename for overloaded functions
+            let output_path = std::path::Path::new(output_dir).join(format!(
+                "{}.{}({}).tree",
+                parsed.contract_name, parsed.function_name, signature
+            ));
+
+            render_tree(&tree, &output_path)?;
+            println!("Generated tree at: {:?}", output_path);
+        }
+        None => {
+            // No signature - generate trees for all overloads
+            let function_contexts = parser.parse_all_functions(
+                &contract_path,
+                &parsed.contract_name,
+                &parsed.function_name,
+            )?;
+
+            let num_overloads = function_contexts.len();
+            if num_overloads == 1 {
+                // Single function, no overloads - use simple naming
+                println!(
+                    "Generating BTT tree for {}::{}",
+                    parsed.contract_name, parsed.function_name
+                );
+
+                let function_ctx = &function_contexts[0];
+                println!("Found {} branch points", function_ctx.branch_points.len());
+
+                let tree =
+                    TreeBuilder::build(&parsed.function_name, function_ctx.branch_points.clone())?;
+
+                let output_path = std::path::Path::new(output_dir).join(format!(
+                    "{}.{}.tree",
+                    parsed.contract_name, parsed.function_name
+                ));
+
+                render_tree(&tree, &output_path)?;
+                println!("Generated tree at: {:?}", output_path);
+            } else {
+                // Multiple overloads - generate tree for each with signature in filename
+                println!(
+                    "Found {} overloads for {}::{}",
+                    num_overloads, parsed.contract_name, parsed.function_name
+                );
+
+                for function_ctx in function_contexts {
+                    println!(
+                        "Generating tree for {}::{}({}) - {} branch points",
+                        parsed.contract_name,
+                        parsed.function_name,
+                        function_ctx.signature,
+                        function_ctx.branch_points.len()
+                    );
+
+                    let tree = TreeBuilder::build(
+                        &parsed.function_name,
+                        function_ctx.branch_points.clone(),
+                    )?;
+
+                    let output_path = std::path::Path::new(output_dir).join(format!(
+                        "{}.{}({}).tree",
+                        parsed.contract_name, parsed.function_name, function_ctx.signature
+                    ));
+
+                    render_tree(&tree, &output_path)?;
+                    println!("  -> {:?}", output_path);
+                }
+
+                println!("Generated {} trees", num_overloads);
+            }
+        }
+    }
 
     Ok(())
 }
 
-fn parse_target(target: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+fn parse_target(target: &str) -> Result<ParsedTarget, Box<dyn std::error::Error>> {
     let parts: Vec<&str> = target.split("::").collect();
     if parts.len() != 2 {
         return Err(format!(
-            "Invalid target format: '{}'. Expected 'ContractName::functionName'",
+            "Invalid target format: '{}'. Expected 'ContractName::functionName' or 'ContractName::functionName(args)'",
             target
         )
         .into());
     }
-    Ok((parts[0].to_string(), parts[1].to_string()))
+
+    let contract_name = parts[0].to_string();
+    let function_part = parts[1];
+
+    // Check if signature is provided: functionName(args)
+    if let Some(open_paren) = function_part.find('(') {
+        if function_part.ends_with(')') {
+            let function_name = function_part[..open_paren].to_string();
+            let signature = function_part[open_paren + 1..function_part.len() - 1].to_string();
+            return Ok(ParsedTarget {
+                contract_name,
+                function_name,
+                signature: Some(signature),
+            });
+        }
+    }
+
+    // No signature - just function name
+    Ok(ParsedTarget {
+        contract_name,
+        function_name: function_part.to_string(),
+        signature: None,
+    })
 }

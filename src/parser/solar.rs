@@ -30,6 +30,8 @@ pub enum ParserError {
 #[derive(Debug)]
 pub struct FunctionContext {
     pub function_name: String,
+    /// The parameter signature (e.g., "address,uint256") for distinguishing overloads
+    pub signature: String,
     pub branch_points: Vec<BranchPoint>,
     pub parameters: Vec<String>,
     pub state_variables: Vec<String>,
@@ -113,12 +115,155 @@ impl<'a> SolarParser<'a> {
                 );
             }
 
+            let signature = self.get_function_signature(function);
+
             Ok(FunctionContext {
                 function_name: function_name.to_string(),
+                signature,
                 branch_points,
                 parameters: params,
                 state_variables: state_vars,
             })
+        })
+    }
+
+    /// Parse a specific function overload by its signature (e.g., "address,uint256")
+    pub fn parse_function_by_signature(
+        &self,
+        file_path: &Path,
+        contract_name: &str,
+        function_name: &str,
+        signature: &str,
+    ) -> Result<FunctionContext, ParserError> {
+        let sess = Session::builder().with_silent_emitter(None).build();
+
+        sess.enter(|| {
+            let arena = ast::Arena::new();
+            let mut parser = Parser::from_file(&sess, &arena, file_path)
+                .map_err(|e| ParserError::ParseError(format!("{:?}", e)))?;
+
+            let source_unit = parser.parse_file().map_err(|e| {
+                e.emit();
+                ParserError::ParseError(file_path.display().to_string())
+            })?;
+
+            let contract = self.find_contract(&source_unit, contract_name)?;
+            let state_vars = self.extract_state_variables(contract);
+            let function = self.find_function_by_signature(contract, function_name, signature)?;
+            let params = self.extract_parameters(function);
+            let modifier_defs = self.extract_modifier_definitions(contract);
+
+            let mut branch_points = Vec::new();
+
+            for modifier in function.header.modifiers.iter() {
+                let modifier_name = modifier.name.last().as_str();
+                if let Some(def) = modifier_defs.iter().find(|(name, _)| name == modifier_name) {
+                    if let Some(body) = &def.1 {
+                        self.extract_branch_points_from_block(
+                            body,
+                            &state_vars,
+                            &params,
+                            &mut branch_points,
+                            false,
+                        );
+                    }
+                }
+            }
+
+            if let Some(body) = &function.body {
+                self.extract_branch_points_from_block(
+                    body,
+                    &state_vars,
+                    &params,
+                    &mut branch_points,
+                    false,
+                );
+            }
+
+            Ok(FunctionContext {
+                function_name: function_name.to_string(),
+                signature: signature.to_string(),
+                branch_points,
+                parameters: params,
+                state_variables: state_vars,
+            })
+        })
+    }
+
+    /// Parse all functions with the given name (returns multiple FunctionContexts for overloads)
+    pub fn parse_all_functions(
+        &self,
+        file_path: &Path,
+        contract_name: &str,
+        function_name: &str,
+    ) -> Result<Vec<FunctionContext>, ParserError> {
+        let sess = Session::builder().with_silent_emitter(None).build();
+
+        sess.enter(|| {
+            let arena = ast::Arena::new();
+            let mut parser = Parser::from_file(&sess, &arena, file_path)
+                .map_err(|e| ParserError::ParseError(format!("{:?}", e)))?;
+
+            let source_unit = parser.parse_file().map_err(|e| {
+                e.emit();
+                ParserError::ParseError(file_path.display().to_string())
+            })?;
+
+            let contract = self.find_contract(&source_unit, contract_name)?;
+            let state_vars = self.extract_state_variables(contract);
+            let modifier_defs = self.extract_modifier_definitions(contract);
+            let functions = self.find_all_functions_by_name(contract, function_name);
+
+            if functions.is_empty() {
+                return Err(ParserError::FunctionNotFound(
+                    function_name.to_string(),
+                    contract_name.to_string(),
+                ));
+            }
+
+            let mut results = Vec::new();
+
+            for function in functions {
+                let params = self.extract_parameters(function);
+                let signature = self.get_function_signature(function);
+                let mut branch_points = Vec::new();
+
+                for modifier in function.header.modifiers.iter() {
+                    let modifier_name = modifier.name.last().as_str();
+                    if let Some(def) = modifier_defs.iter().find(|(name, _)| name == modifier_name)
+                    {
+                        if let Some(body) = &def.1 {
+                            self.extract_branch_points_from_block(
+                                body,
+                                &state_vars,
+                                &params,
+                                &mut branch_points,
+                                false,
+                            );
+                        }
+                    }
+                }
+
+                if let Some(body) = &function.body {
+                    self.extract_branch_points_from_block(
+                        body,
+                        &state_vars,
+                        &params,
+                        &mut branch_points,
+                        false,
+                    );
+                }
+
+                results.push(FunctionContext {
+                    function_name: function_name.to_string(),
+                    signature,
+                    branch_points,
+                    parameters: params,
+                    state_variables: state_vars.clone(),
+                });
+            }
+
+            Ok(results)
         })
     }
 
@@ -155,6 +300,74 @@ impl<'a> SolarParser<'a> {
             name.to_string(),
             contract.name.to_string(),
         ))
+    }
+
+    /// Find all functions with the given name (for handling overloads)
+    fn find_all_functions_by_name<'ast>(
+        &self,
+        contract: &'ast ast::ItemContract<'ast>,
+        name: &str,
+    ) -> Vec<&'ast ast::ItemFunction<'ast>> {
+        let mut functions = Vec::new();
+        for item in contract.body.iter() {
+            if let ItemKind::Function(func) = &item.kind {
+                if let Some(func_name) = &func.header.name {
+                    if func_name.as_str() == name {
+                        functions.push(func);
+                    }
+                }
+            }
+        }
+        functions
+    }
+
+    /// Find a function by name and parameter signature (e.g., "address,uint256")
+    fn find_function_by_signature<'ast>(
+        &self,
+        contract: &'ast ast::ItemContract<'ast>,
+        name: &str,
+        signature: &str,
+    ) -> Result<&'ast ast::ItemFunction<'ast>, ParserError> {
+        for item in contract.body.iter() {
+            if let ItemKind::Function(func) = &item.kind {
+                if let Some(func_name) = &func.header.name {
+                    if func_name.as_str() == name {
+                        let func_sig = self.get_function_signature(func);
+                        if func_sig == signature {
+                            return Ok(func);
+                        }
+                    }
+                }
+            }
+        }
+        Err(ParserError::FunctionNotFound(
+            format!("{}({})", name, signature),
+            contract.name.to_string(),
+        ))
+    }
+
+    /// Extract the parameter type signature from a function (e.g., "address,uint256")
+    fn get_function_signature(&self, function: &ast::ItemFunction<'_>) -> String {
+        function
+            .header
+            .parameters
+            .iter()
+            .map(|p| self.type_to_string(&p.ty))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Convert a Solidity type to its string representation
+    fn type_to_string(&self, ty: &ast::Type<'_>) -> String {
+        use ast::TypeKind::*;
+        match &ty.kind {
+            Elementary(elem) => format!("{}", elem),
+            Custom(path) => path.last().to_string(),
+            Array(type_array) => format!("{}[]", self.type_to_string(&type_array.element)),
+            Function(_) => "function".to_string(),
+            Mapping(_) => "mapping".to_string(),
+            _ => "unknown".to_string(),
+        }
     }
 
     fn extract_modifier_definitions<'ast>(

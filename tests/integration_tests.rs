@@ -115,3 +115,96 @@ fn test_storage_condition() {
 
     assert_eq!(tree, expected);
 }
+
+// ============= Function Overloading Tests =============
+
+#[test]
+fn test_overload_specific_signature_one_param() {
+    use common::generate_tree_for_function_with_signature;
+
+    // Test transfer(address) overload
+    let tree =
+        generate_tree_for_function_with_signature("FunctionOverloading", "transfer", "address");
+
+    let expected = r#"transfer
+├── when to is expr(...)
+│   └── it should revert
+└── when to is not expr(...)
+    └── it should succeed
+"#;
+
+    assert_eq!(tree, expected);
+}
+
+#[test]
+fn test_overload_specific_signature_two_params() {
+    use common::generate_tree_for_function_with_signature;
+
+    // Test transfer(address, uint256) overload
+    let tree = generate_tree_for_function_with_signature(
+        "FunctionOverloading",
+        "transfer",
+        "address,uint256",
+    );
+
+    let expected = r#"transfer
+├── when to is expr(...)
+│   └── it should revert
+└── when to is not expr(...)
+    ├── when amount is at most zero
+    │   └── it should revert
+    └── when amount is greater than zero
+        └── it should succeed
+"#;
+
+    assert_eq!(tree, expected);
+}
+
+#[test]
+fn test_overload_specific_signature_three_params() {
+    use common::generate_tree_for_function_with_signature;
+
+    // Test transfer(address, uint256, bytes) overload
+    let tree = generate_tree_for_function_with_signature(
+        "FunctionOverloading",
+        "transfer",
+        "address,uint256,bytes",
+    );
+
+    let expected = r#"transfer
+├── when to is expr(...)
+│   └── it should revert
+└── when to is not expr(...)
+    ├── when amount is at most zero
+    │   └── it should revert
+    └── when amount is greater than zero
+        ├── when data.length is at most zero
+        │   └── it should revert
+        └── when data.length is greater than zero
+            └── it should succeed
+"#;
+
+    assert_eq!(tree, expected);
+}
+
+#[test]
+fn test_generate_all_overloads() {
+    use common::generate_trees_for_all_overloads;
+
+    // Generate trees for all transfer overloads
+    let trees = generate_trees_for_all_overloads("FunctionOverloading", "transfer");
+
+    // Should have 3 overloads
+    assert_eq!(trees.len(), 3);
+
+    // Verify signatures are present
+    let signatures: Vec<&str> = trees.iter().map(|(sig, _)| sig.as_str()).collect();
+    assert!(signatures.contains(&"address"));
+    assert!(signatures.contains(&"address,uint256"));
+    assert!(signatures.contains(&"address,uint256,bytes"));
+
+    // Each tree should have the function name as root
+    for (_, tree) in &trees {
+        assert!(tree.starts_with("transfer\n"));
+    }
+}
