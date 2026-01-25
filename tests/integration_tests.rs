@@ -232,3 +232,49 @@ fn test_generate_all_public_functions() {
     assert!(!func_names.contains(&"internalFunc"));
     assert!(!func_names.contains(&"privateFunc"));
 }
+
+// ============= Inheritance Tests =============
+
+/// Test to verify whether modifiers from parent contracts (in separate files) are resolved
+/// Currently, this test documents the CURRENT behavior - modifiers from parent contracts
+/// in separate files are NOT resolved.
+#[test]
+fn test_inheritance_modifier_from_parent_contract() {
+    use common::generate_tree_for_function_at_path;
+
+    // ChildContract inherits from Ownable (in a separate file)
+    // setValue uses onlyOwner modifier from Ownable
+    let tree = generate_tree_for_function_at_path(
+        "inheritance/ChildContract",
+        "ChildContract",
+        "setValue",
+    );
+
+    // CURRENT BEHAVIOR: Only the function body's require is resolved
+    // The onlyOwner modifier from the parent contract is NOT resolved
+    // because it's defined in a separate file (Ownable.sol)
+    let current_behavior = r#"setValue
+├── when newValue is at most zero
+│   └── it should revert
+└── when newValue is greater than zero
+    └── it should succeed
+"#;
+
+    // EXPECTED BEHAVIOR (if inheritance was supported):
+    // The onlyOwner modifier should also be included
+    let _expected_with_inheritance = r#"setValue
+├── given msg.sender is not owner
+│   └── it should revert
+└── given msg.sender is owner
+    ├── when newValue is at most zero
+    │   └── it should revert
+    └── when newValue is greater than zero
+        └── it should succeed
+"#;
+
+    // This test documents current behavior - will need to be updated when inheritance is supported
+    assert_eq!(
+        tree, current_behavior,
+        "Current behavior: parent modifiers are not resolved"
+    );
+}

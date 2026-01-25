@@ -76,6 +76,75 @@ pub fn generate_tree_for_function(contract_name: &str, function_name: &str) -> S
     })
 }
 
+/// Generate a BTT tree for a function in a test contract at a relative path
+/// Path is relative to testdata directory (e.g. "inheritance/ChildContract")
+pub fn generate_tree_for_function_at_path(
+    relative_path: &str,
+    contract_name: &str,
+    function_name: &str,
+) -> String {
+    let file_path = testdata_dir().join(format!("{}.sol", relative_path));
+
+    let sess = Session::builder().with_silent_emitter(None).build();
+
+    sess.enter(|| {
+        let arena = ast::Arena::new();
+        let mut parser =
+            Parser::from_file(&sess, &arena, &file_path).expect("Failed to create parser");
+
+        let source_unit = parser
+            .parse_file()
+            .map_err(|e| {
+                e.emit();
+            })
+            .expect("Failed to parse file");
+
+        // Find contract and function
+        let contract = find_contract(&source_unit, contract_name).expect("Contract not found");
+
+        let function = find_function(contract, function_name).expect("Function not found");
+
+        // Extract state variables
+        let state_vars = extract_state_variables(contract);
+
+        // Extract parameters
+        let params = extract_parameters(function);
+
+        // Extract modifier definitions from THIS contract only (current limitation)
+        let modifier_defs = extract_modifier_definitions(contract);
+
+        // Extract branch points
+        let mut branch_points = Vec::new();
+
+        // From modifiers
+        for modifier in function.header.modifiers.iter() {
+            let modifier_name = modifier.name.last().as_str();
+            if let Some((_, body)) = modifier_defs.iter().find(|(name, _)| name == modifier_name) {
+                if let Some(body) = body {
+                    extract_branch_points_from_block(
+                        body,
+                        &state_vars,
+                        &params,
+                        &mut branch_points,
+                        false,
+                    );
+                }
+            }
+        }
+
+        // From function body
+        if let Some(body) = &function.body {
+            extract_branch_points_from_block(body, &state_vars, &params, &mut branch_points, false);
+        }
+
+        // Build tree
+        let tree = build_tree(function_name, branch_points);
+
+        // Render to string
+        render_tree(&tree)
+    })
+}
+
 /// Generate a BTT tree for a specific function overload by signature
 pub fn generate_tree_for_function_with_signature(
     contract_name: &str,

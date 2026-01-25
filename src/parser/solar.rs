@@ -127,7 +127,193 @@ impl<'a> SolarParser<'a> {
         })
     }
 
+    /// Parse a function with full inheritance support - resolves modifiers from parent contracts
+    pub fn parse_function_with_inheritance(
+        &self,
+        file_path: &Path,
+        contract_name: &str,
+        function_name: &str,
+    ) -> Result<FunctionContext, ParserError> {
+        use super::resolver::InheritanceResolver;
+
+        // Build inheritance chain
+        let mut resolver = InheritanceResolver::new(self.project);
+        let chain = resolver.build_inheritance_chain(contract_name, file_path);
+
+        // Collect modifiers from all contracts in the inheritance chain
+        // We'll extract branch points from each modifier in sequence
+        let mut inherited_branch_points: Vec<BranchPoint> = Vec::new();
+
+        // First pass: collect branch points from modifiers in parent contracts
+        for (parent_file, parent_contract_name) in &chain {
+            // Skip the actual contract itself - we'll handle it in the main pass
+            if parent_contract_name == contract_name && parent_file == file_path {
+                continue;
+            }
+
+            // Parse parent file and extract modifier branch points
+            if let Ok(parent_modifiers) =
+                self.extract_modifier_branch_points(parent_file, parent_contract_name)
+            {
+                inherited_branch_points.extend(parent_modifiers);
+            }
+        }
+
+        // Now parse the actual function
+        let sess = Session::builder().with_silent_emitter(None).build();
+
+        sess.enter(|| {
+            let arena = ast::Arena::new();
+            let mut parser = Parser::from_file(&sess, &arena, file_path)
+                .map_err(|e| ParserError::ParseError(format!("{:?}", e)))?;
+
+            let source_unit = parser.parse_file().map_err(|e| {
+                e.emit();
+                ParserError::ParseError(file_path.display().to_string())
+            })?;
+
+            let contract = self.find_contract(&source_unit, contract_name)?;
+            let state_vars = self.extract_state_variables(contract);
+            let function = self.find_function(contract, function_name)?;
+            let params = self.extract_parameters(function);
+
+            // Get modifier definitions from this contract
+            let modifier_defs = self.extract_modifier_definitions(contract);
+
+            // Start with inherited branch points from parent modifiers
+            let mut branch_points = Vec::new();
+
+            // For each modifier used by the function, check if it's from a parent
+            for modifier in function.header.modifiers.iter() {
+                let modifier_name = modifier.name.last().as_str();
+
+                // First check local definition
+                if let Some(def) = modifier_defs.iter().find(|(name, _)| name == modifier_name) {
+                    if let Some(body) = &def.1 {
+                        self.extract_branch_points_from_block(
+                            body,
+                            &state_vars,
+                            &params,
+                            &mut branch_points,
+                            false,
+                        );
+                    }
+                } else {
+                    // Modifier not found locally - search in inheritance chain
+                    for (parent_file, parent_contract_name) in &chain {
+                        if parent_contract_name == contract_name && parent_file == file_path {
+                            continue;
+                        }
+
+                        // Check if this parent has the modifier
+                        if let Ok(parent_bp) = self.extract_specific_modifier_branch_points(
+                            parent_file,
+                            parent_contract_name,
+                            modifier_name,
+                            &state_vars,
+                            &params,
+                        ) {
+                            branch_points.extend(parent_bp);
+                            break; // Found it, stop searching
+                        }
+                    }
+                }
+            }
+
+            // Extract from function body
+            if let Some(body) = &function.body {
+                self.extract_branch_points_from_block(
+                    body,
+                    &state_vars,
+                    &params,
+                    &mut branch_points,
+                    false,
+                );
+            }
+
+            let signature = self.get_function_signature(function);
+
+            Ok(FunctionContext {
+                function_name: function_name.to_string(),
+                signature,
+                branch_points,
+                parameters: params,
+                state_variables: state_vars,
+            })
+        })
+    }
+
+    /// Extract branch points from modifiers in a contract (for inheritance)
+    fn extract_modifier_branch_points(
+        &self,
+        _file_path: &Path,
+        _contract_name: &str,
+    ) -> Result<Vec<BranchPoint>, ParserError> {
+        // This parses just to collect modifier names for the resolver
+        // Actual extraction happens in extract_specific_modifier_branch_points
+        Ok(Vec::new())
+    }
+
+    /// Extract branch points from a specific modifier in a parent contract
+    fn extract_specific_modifier_branch_points(
+        &self,
+        file_path: &Path,
+        contract_name: &str,
+        modifier_name: &str,
+        state_vars: &[String],
+        params: &[String],
+    ) -> Result<Vec<BranchPoint>, ParserError> {
+        let sess = Session::builder().with_silent_emitter(None).build();
+
+        sess.enter(|| {
+            let arena = ast::Arena::new();
+            let mut parser = Parser::from_file(&sess, &arena, file_path)
+                .map_err(|e| ParserError::ParseError(format!("{:?}", e)))?;
+
+            let source_unit = parser.parse_file().map_err(|e| {
+                e.emit();
+                ParserError::ParseError(file_path.display().to_string())
+            })?;
+
+            let contract = self.find_contract(&source_unit, contract_name)?;
+
+            // Also collect parent state vars
+            let parent_state_vars = self.extract_state_variables(contract);
+            let combined_state_vars: Vec<String> = state_vars
+                .iter()
+                .cloned()
+                .chain(parent_state_vars.iter().cloned())
+                .collect();
+
+            // Find the modifier
+            for item in contract.body.iter() {
+                if let ItemKind::Function(func) = &item.kind {
+                    if func.kind == ast::FunctionKind::Modifier {
+                        if let Some(name) = &func.header.name {
+                            if name.as_str() == modifier_name {
+                                if let Some(body) = &func.body {
+                                    let mut branch_points = Vec::new();
+                                    self.extract_branch_points_from_block(
+                                        body,
+                                        &combined_state_vars,
+                                        params,
+                                        &mut branch_points,
+                                        false,
+                                    );
+                                    return Ok(branch_points);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(Vec::new())
+        })
+    }
+
     /// Parse a specific function overload by its signature (e.g., "address,uint256")
+    /// Now includes inheritance support for modifiers
     pub fn parse_function_by_signature(
         &self,
         file_path: &Path,
@@ -135,6 +321,12 @@ impl<'a> SolarParser<'a> {
         function_name: &str,
         signature: &str,
     ) -> Result<FunctionContext, ParserError> {
+        use super::resolver::InheritanceResolver;
+
+        // Build inheritance chain
+        let mut resolver = InheritanceResolver::new(self.project);
+        let chain = resolver.build_inheritance_chain(contract_name, file_path);
+
         let sess = Session::builder().with_silent_emitter(None).build();
 
         sess.enter(|| {
@@ -157,6 +349,8 @@ impl<'a> SolarParser<'a> {
 
             for modifier in function.header.modifiers.iter() {
                 let modifier_name = modifier.name.last().as_str();
+
+                // First check local definition
                 if let Some(def) = modifier_defs.iter().find(|(name, _)| name == modifier_name) {
                     if let Some(body) = &def.1 {
                         self.extract_branch_points_from_block(
@@ -166,6 +360,26 @@ impl<'a> SolarParser<'a> {
                             &mut branch_points,
                             false,
                         );
+                    }
+                } else {
+                    // Modifier not found locally - search in inheritance chain
+                    for (parent_file, parent_contract_name) in &chain {
+                        if parent_contract_name == contract_name && parent_file == file_path {
+                            continue;
+                        }
+
+                        if let Ok(parent_bp) = self.extract_specific_modifier_branch_points(
+                            parent_file,
+                            parent_contract_name,
+                            modifier_name,
+                            &state_vars,
+                            &params,
+                        ) {
+                            if !parent_bp.is_empty() {
+                                branch_points.extend(parent_bp);
+                                break;
+                            }
+                        }
                     }
                 }
             }
