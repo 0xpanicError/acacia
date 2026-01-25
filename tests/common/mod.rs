@@ -201,6 +201,98 @@ pub fn generate_trees_for_all_overloads(
     })
 }
 
+/// Generate BTT trees for all public/external functions in a contract
+/// Returns (function_name, tree) pairs
+pub fn generate_trees_for_contract(contract_name: &str) -> Vec<(String, String)> {
+    use ast::FunctionKind;
+    use ast::Visibility;
+
+    let file_path = testdata_dir().join(format!("{}.sol", contract_name));
+
+    let sess = Session::builder().with_silent_emitter(None).build();
+
+    sess.enter(|| {
+        let arena = ast::Arena::new();
+        let mut parser =
+            Parser::from_file(&sess, &arena, &file_path).expect("Failed to create parser");
+
+        let source_unit = parser
+            .parse_file()
+            .map_err(|e| {
+                e.emit();
+            })
+            .expect("Failed to parse file");
+
+        let contract = find_contract(&source_unit, contract_name).expect("Contract not found");
+        let state_vars = extract_state_variables(contract);
+        let modifier_defs = extract_modifier_definitions(contract);
+
+        // Find all public/external functions
+        let mut public_functions = Vec::new();
+        for item in contract.body.iter() {
+            if let ItemKind::Function(func) = &item.kind {
+                // Skip modifiers, constructors, etc.
+                if func.kind != FunctionKind::Function {
+                    continue;
+                }
+                // Must have a name
+                let func_name = match &func.header.name {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                // Check visibility
+                let is_public_or_external = match &func.header.visibility {
+                    Some(spanned) => {
+                        matches!(spanned.data, Visibility::Public | Visibility::External)
+                    }
+                    None => true,
+                };
+                if is_public_or_external {
+                    public_functions.push((func_name, func));
+                }
+            }
+        }
+
+        let mut results = Vec::new();
+
+        for (func_name, function) in public_functions {
+            let params = extract_parameters(function);
+            let mut branch_points = Vec::new();
+
+            for modifier in function.header.modifiers.iter() {
+                let modifier_name = modifier.name.last().as_str();
+                if let Some((_, body)) =
+                    modifier_defs.iter().find(|(name, _)| name == modifier_name)
+                {
+                    if let Some(body) = body {
+                        extract_branch_points_from_block(
+                            body,
+                            &state_vars,
+                            &params,
+                            &mut branch_points,
+                            false,
+                        );
+                    }
+                }
+            }
+
+            if let Some(body) = &function.body {
+                extract_branch_points_from_block(
+                    body,
+                    &state_vars,
+                    &params,
+                    &mut branch_points,
+                    false,
+                );
+            }
+
+            let tree = build_tree(&func_name, branch_points);
+            results.push((func_name, render_tree(&tree)));
+        }
+
+        results
+    })
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConditionContext {
     Storage,

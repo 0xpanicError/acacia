@@ -208,3 +208,27 @@ fn test_generate_all_overloads() {
         assert!(tree.starts_with("transfer\n"));
     }
 }
+
+// ============= Contract-Wide Generation Tests =============
+
+#[test]
+fn test_generate_all_public_functions() {
+    use common::generate_trees_for_contract;
+
+    // Generate trees for all public/external functions in AllFunctions contract
+    let trees = generate_trees_for_contract("AllFunctions");
+
+    // Should have 3 public/external functions: externalFunc, publicFunc, pausableFunc
+    // Should NOT include internalFunc or privateFunc
+    assert_eq!(trees.len(), 3);
+
+    // Verify function names are present
+    let func_names: Vec<&str> = trees.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(func_names.contains(&"externalFunc"));
+    assert!(func_names.contains(&"publicFunc"));
+    assert!(func_names.contains(&"pausableFunc"));
+
+    // Should NOT include internal/private functions
+    assert!(!func_names.contains(&"internalFunc"));
+    assert!(!func_names.contains(&"privateFunc"));
+}

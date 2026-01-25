@@ -18,7 +18,7 @@ pub struct Cli {
 enum Commands {
     /// Generate a BTT-style test tree for a function
     Generate {
-        /// Target function in format ContractName::functionName or ContractName::functionName(args)
+        /// Target: ContractName, ContractName::functionName, or ContractName::functionName(args)
         #[arg(value_name = "TARGET")]
         target: String,
 
@@ -36,16 +36,16 @@ impl Cli {
     }
 }
 
-/// Parsed target with optional signature for overload disambiguation
+/// Parsed target with optional function name and signature
 struct ParsedTarget {
     contract_name: String,
-    function_name: String,
+    /// None = all public/external functions, Some = specific function
+    function_name: Option<String>,
     /// Optional signature like "address,uint256" for specific overload
     signature: Option<String>,
 }
 
 fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse target: ContractName::functionName or ContractName::functionName(args)
     let parsed = parse_target(target)?;
 
     // 1. Discover Foundry project
@@ -59,60 +59,96 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
     // 3. Parse with Solar and extract branch points
     let parser = SolarParser::new(&project);
 
-    match parsed.signature {
-        Some(signature) => {
-            // Specific signature provided - generate single tree
+    match (&parsed.function_name, &parsed.signature) {
+        // Contract only - generate trees for all public/external functions
+        (None, _) => {
+            println!(
+                "Generating BTT trees for all public/external functions in {}",
+                parsed.contract_name
+            );
+
+            let function_contexts =
+                parser.parse_all_public_functions(&contract_path, &parsed.contract_name)?;
+
+            if function_contexts.is_empty() {
+                println!("No public/external functions found in contract");
+                return Ok(());
+            }
+
+            println!(
+                "Found {} public/external functions",
+                function_contexts.len()
+            );
+
+            let count = function_contexts.len();
+            for function_ctx in function_contexts {
+                let func_name = &function_ctx.function_name;
+                println!(
+                    "Generating tree for {}::{} - {} branch points",
+                    parsed.contract_name,
+                    func_name,
+                    function_ctx.branch_points.len()
+                );
+
+                let tree = TreeBuilder::build(func_name, function_ctx.branch_points.clone())?;
+
+                let output_path = std::path::Path::new(output_dir)
+                    .join(format!("{}.{}.tree", parsed.contract_name, func_name));
+
+                render_tree(&tree, &output_path)?;
+                println!("  -> {:?}", output_path);
+            }
+
+            println!("Generated {} trees for {}", count, parsed.contract_name);
+        }
+
+        // Specific function with signature
+        (Some(function_name), Some(signature)) => {
             println!(
                 "Generating BTT tree for {}::{}({})",
-                parsed.contract_name, parsed.function_name, signature
+                parsed.contract_name, function_name, signature
             );
 
             let function_ctx = parser.parse_function_by_signature(
                 &contract_path,
                 &parsed.contract_name,
-                &parsed.function_name,
-                &signature,
+                function_name,
+                signature,
             )?;
 
             println!("Found {} branch points", function_ctx.branch_points.len());
 
-            let tree = TreeBuilder::build(&parsed.function_name, function_ctx.branch_points)?;
+            let tree = TreeBuilder::build(function_name, function_ctx.branch_points)?;
 
-            // Include signature in filename for overloaded functions
             let output_path = std::path::Path::new(output_dir).join(format!(
                 "{}.{}({}).tree",
-                parsed.contract_name, parsed.function_name, signature
+                parsed.contract_name, function_name, signature
             ));
 
             render_tree(&tree, &output_path)?;
             println!("Generated tree at: {:?}", output_path);
         }
-        None => {
-            // No signature - generate trees for all overloads
-            let function_contexts = parser.parse_all_functions(
-                &contract_path,
-                &parsed.contract_name,
-                &parsed.function_name,
-            )?;
+
+        // Function name without signature - generate for all overloads
+        (Some(function_name), None) => {
+            let function_contexts =
+                parser.parse_all_functions(&contract_path, &parsed.contract_name, function_name)?;
 
             let num_overloads = function_contexts.len();
             if num_overloads == 1 {
                 // Single function, no overloads - use simple naming
                 println!(
                     "Generating BTT tree for {}::{}",
-                    parsed.contract_name, parsed.function_name
+                    parsed.contract_name, function_name
                 );
 
                 let function_ctx = &function_contexts[0];
                 println!("Found {} branch points", function_ctx.branch_points.len());
 
-                let tree =
-                    TreeBuilder::build(&parsed.function_name, function_ctx.branch_points.clone())?;
+                let tree = TreeBuilder::build(function_name, function_ctx.branch_points.clone())?;
 
-                let output_path = std::path::Path::new(output_dir).join(format!(
-                    "{}.{}.tree",
-                    parsed.contract_name, parsed.function_name
-                ));
+                let output_path = std::path::Path::new(output_dir)
+                    .join(format!("{}.{}.tree", parsed.contract_name, function_name));
 
                 render_tree(&tree, &output_path)?;
                 println!("Generated tree at: {:?}", output_path);
@@ -120,26 +156,24 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
                 // Multiple overloads - generate tree for each with signature in filename
                 println!(
                     "Found {} overloads for {}::{}",
-                    num_overloads, parsed.contract_name, parsed.function_name
+                    num_overloads, parsed.contract_name, function_name
                 );
 
                 for function_ctx in function_contexts {
                     println!(
                         "Generating tree for {}::{}({}) - {} branch points",
                         parsed.contract_name,
-                        parsed.function_name,
+                        function_name,
                         function_ctx.signature,
                         function_ctx.branch_points.len()
                     );
 
-                    let tree = TreeBuilder::build(
-                        &parsed.function_name,
-                        function_ctx.branch_points.clone(),
-                    )?;
+                    let tree =
+                        TreeBuilder::build(function_name, function_ctx.branch_points.clone())?;
 
                     let output_path = std::path::Path::new(output_dir).join(format!(
                         "{}.{}({}).tree",
-                        parsed.contract_name, parsed.function_name, function_ctx.signature
+                        parsed.contract_name, function_name, function_ctx.signature
                     ));
 
                     render_tree(&tree, &output_path)?;
@@ -155,35 +189,36 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
 }
 
 fn parse_target(target: &str) -> Result<ParsedTarget, Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = target.split("::").collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "Invalid target format: '{}'. Expected 'ContractName::functionName' or 'ContractName::functionName(args)'",
-            target
-        )
-        .into());
-    }
+    // Check if it contains :: (has function name)
+    if let Some(separator_pos) = target.find("::") {
+        let contract_name = target[..separator_pos].to_string();
+        let function_part = &target[separator_pos + 2..];
 
-    let contract_name = parts[0].to_string();
-    let function_part = parts[1];
-
-    // Check if signature is provided: functionName(args)
-    if let Some(open_paren) = function_part.find('(') {
-        if function_part.ends_with(')') {
-            let function_name = function_part[..open_paren].to_string();
-            let signature = function_part[open_paren + 1..function_part.len() - 1].to_string();
-            return Ok(ParsedTarget {
-                contract_name,
-                function_name,
-                signature: Some(signature),
-            });
+        // Check if signature is provided: functionName(args)
+        if let Some(open_paren) = function_part.find('(') {
+            if function_part.ends_with(')') {
+                let function_name = function_part[..open_paren].to_string();
+                let signature = function_part[open_paren + 1..function_part.len() - 1].to_string();
+                return Ok(ParsedTarget {
+                    contract_name,
+                    function_name: Some(function_name),
+                    signature: Some(signature),
+                });
+            }
         }
-    }
 
-    // No signature - just function name
-    Ok(ParsedTarget {
-        contract_name,
-        function_name: function_part.to_string(),
-        signature: None,
-    })
+        // No signature - just function name
+        Ok(ParsedTarget {
+            contract_name,
+            function_name: Some(function_part.to_string()),
+            signature: None,
+        })
+    } else {
+        // Contract name only - generate for all public/external functions
+        Ok(ParsedTarget {
+            contract_name: target.to_string(),
+            function_name: None,
+            signature: None,
+        })
+    }
 }

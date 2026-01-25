@@ -267,6 +267,81 @@ impl<'a> SolarParser<'a> {
         })
     }
 
+    /// Parse all public and external functions in a contract
+    pub fn parse_all_public_functions(
+        &self,
+        file_path: &Path,
+        contract_name: &str,
+    ) -> Result<Vec<FunctionContext>, ParserError> {
+        let sess = Session::builder().with_silent_emitter(None).build();
+
+        sess.enter(|| {
+            let arena = ast::Arena::new();
+            let mut parser = Parser::from_file(&sess, &arena, file_path)
+                .map_err(|e| ParserError::ParseError(format!("{:?}", e)))?;
+
+            let source_unit = parser.parse_file().map_err(|e| {
+                e.emit();
+                ParserError::ParseError(file_path.display().to_string())
+            })?;
+
+            let contract = self.find_contract(&source_unit, contract_name)?;
+            let state_vars = self.extract_state_variables(contract);
+            let modifier_defs = self.extract_modifier_definitions(contract);
+            let functions = self.find_all_public_external_functions(contract);
+
+            let mut results = Vec::new();
+
+            for function in functions {
+                let func_name = function
+                    .header
+                    .name
+                    .as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let params = self.extract_parameters(function);
+                let signature = self.get_function_signature(function);
+                let mut branch_points = Vec::new();
+
+                for modifier in function.header.modifiers.iter() {
+                    let modifier_name = modifier.name.last().as_str();
+                    if let Some(def) = modifier_defs.iter().find(|(name, _)| name == modifier_name)
+                    {
+                        if let Some(body) = &def.1 {
+                            self.extract_branch_points_from_block(
+                                body,
+                                &state_vars,
+                                &params,
+                                &mut branch_points,
+                                false,
+                            );
+                        }
+                    }
+                }
+
+                if let Some(body) = &function.body {
+                    self.extract_branch_points_from_block(
+                        body,
+                        &state_vars,
+                        &params,
+                        &mut branch_points,
+                        false,
+                    );
+                }
+
+                results.push(FunctionContext {
+                    function_name: func_name,
+                    signature,
+                    branch_points,
+                    parameters: params,
+                    state_variables: state_vars.clone(),
+                });
+            }
+
+            Ok(results)
+        })
+    }
+
     fn find_contract<'ast>(
         &self,
         source_unit: &'ast ast::SourceUnit<'ast>,
@@ -315,6 +390,43 @@ impl<'a> SolarParser<'a> {
                     if func_name.as_str() == name {
                         functions.push(func);
                     }
+                }
+            }
+        }
+        functions
+    }
+
+    /// Find all public and external functions in a contract (excludes modifiers, constructors, internal, private)
+    fn find_all_public_external_functions<'ast>(
+        &self,
+        contract: &'ast ast::ItemContract<'ast>,
+    ) -> Vec<&'ast ast::ItemFunction<'ast>> {
+        use ast::FunctionKind;
+        use ast::Visibility;
+
+        let mut functions = Vec::new();
+        for item in contract.body.iter() {
+            if let ItemKind::Function(func) = &item.kind {
+                // Skip modifiers, constructors, fallback, receive
+                if func.kind != FunctionKind::Function {
+                    continue;
+                }
+
+                // Must have a name
+                if func.header.name.is_none() {
+                    continue;
+                }
+
+                // Check visibility - only public and external
+                let is_public_or_external = match &func.header.visibility {
+                    Some(spanned) => {
+                        matches!(spanned.data, Visibility::Public | Visibility::External)
+                    }
+                    None => true, // Default visibility for functions is public in Solidity
+                };
+
+                if is_public_or_external {
+                    functions.push(func);
                 }
             }
         }
