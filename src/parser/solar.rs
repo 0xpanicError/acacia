@@ -342,6 +342,31 @@ impl<'a> SolarParser<'a> {
         })
     }
 
+    /// Get all contract names defined in a Solidity file
+    pub fn get_contract_names(&self, file_path: &Path) -> Result<Vec<String>, ParserError> {
+        let sess = Session::builder().with_silent_emitter(None).build();
+
+        sess.enter(|| {
+            let arena = ast::Arena::new();
+            let mut parser = Parser::from_file(&sess, &arena, file_path)
+                .map_err(|e| ParserError::ParseError(format!("{:?}", e)))?;
+
+            let source_unit = parser.parse_file().map_err(|e| {
+                e.emit();
+                ParserError::ParseError(file_path.display().to_string())
+            })?;
+
+            let mut contracts = Vec::new();
+            for item in source_unit.items.iter() {
+                if let ItemKind::Contract(contract) = &item.kind {
+                    contracts.push(contract.name.to_string());
+                }
+            }
+
+            Ok(contracts)
+        })
+    }
+
     fn find_contract<'ast>(
         &self,
         source_unit: &'ast ast::SourceUnit<'ast>,

@@ -194,4 +194,24 @@ impl FoundryProject {
 
         None
     }
+
+    /// Find all Solidity contract files in the src directory
+    pub fn find_all_contracts(&self) -> Vec<PathBuf> {
+        let mut contracts = Vec::new();
+
+        for entry in WalkDir::new(&self.src_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "sol" {
+                        contracts.push(entry.path().to_path_buf());
+                    }
+                }
+            }
+        }
+
+        contracts
+    }
 }
