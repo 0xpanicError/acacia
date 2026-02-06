@@ -3,4 +3,4 @@
 mod resolver;
 mod solar;
 
-pub use solar::SolarParser;
+pub use solar::{FunctionContext, SolarParser};

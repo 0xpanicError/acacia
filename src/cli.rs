@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 
 use crate::foundry::FoundryProject;
-use crate::output::render_tree;
+use crate::output::render_to_string;
 use crate::parser::SolarParser;
 use crate::tree::TreeBuilder;
 
@@ -85,31 +89,8 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
                 };
 
                 for contract_name in contracts {
-                    // Get all public/external functions for this contract
-                    let function_contexts =
-                        match parser.parse_all_public_functions(&file_path, &contract_name) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                eprintln!(
-                                    "Warning: Failed to parse functions in {}: {}",
-                                    contract_name, e
-                                );
-                                continue;
-                            }
-                        };
-
-                    for function_ctx in function_contexts {
-                        let func_name = &function_ctx.function_name;
-                        let tree =
-                            TreeBuilder::build(func_name, function_ctx.branch_points.clone())?;
-
-                        let output_path = std::path::Path::new(output_dir)
-                            .join(format!("{}.{}.tree", contract_name, func_name));
-
-                        render_tree(&tree, &output_path)?;
-                        println!("  -> {:?}", output_path);
-                        total_trees += 1;
-                    }
+                    total_trees +=
+                        process_contract(&parser, &file_path, &contract_name, output_dir)?;
                 }
             }
 
@@ -126,34 +107,7 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
                 contract_name
             );
 
-            let function_contexts =
-                parser.parse_all_public_functions(&contract_path, &contract_name)?;
-
-            if function_contexts.is_empty() {
-                println!("No public/external functions found in contract");
-                return Ok(());
-            }
-
-            let count = function_contexts.len();
-            println!("Found {} public/external functions", count);
-
-            for function_ctx in function_contexts {
-                let func_name = &function_ctx.function_name;
-                println!(
-                    "Generating tree for {}::{} - {} branch points",
-                    contract_name,
-                    func_name,
-                    function_ctx.branch_points.len()
-                );
-
-                let tree = TreeBuilder::build(func_name, function_ctx.branch_points.clone())?;
-
-                let output_path = std::path::Path::new(output_dir)
-                    .join(format!("{}.{}.tree", contract_name, func_name));
-
-                render_tree(&tree, &output_path)?;
-                println!("  -> {:?}", output_path);
-            }
+            let count = process_contract(&parser, &contract_path, &contract_name, output_dir)?;
 
             println!("Generated {} trees for {}", count, contract_name);
         }
@@ -166,6 +120,10 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
         } => {
             let contract_path = project.find_contract(&contract_name)?;
             println!("Found contract at: {:?}", contract_path);
+
+            let contract_snake = to_snake_case(&contract_name);
+            let contract_output_dir = Path::new(output_dir).join(contract_snake);
+            fs::create_dir_all(&contract_output_dir)?;
 
             match signature {
                 Some(sig) => {
@@ -185,15 +143,27 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
                     println!("Found {} branch points", function_ctx.branch_points.len());
 
                     let tree = TreeBuilder::build(&function_name, function_ctx.branch_points)?;
+                    let content = render_to_string(&tree);
 
-                    let output_path = std::path::Path::new(output_dir)
-                        .join(format!("{}.{}({}).tree", contract_name, function_name, sig));
+                    // Note: We append only if it exists? Or wait, user wants overloads in same file.
+                    // But here we are targeting a specific signature.
+                    // If the user specifies a signature, they probably want just that tree.
+                    // However, to be consistent with the file naming convention "FunctionName.tree",
+                    // if we modify that file, we should probably append to it if it exists, or overwrite?
+                    // Given the user said "in case of function overloading ... keep file name the same as function name and add all trees in the same file",
+                    // implies if we run this command multiple times for different signatures, they might want them merged.
+                    // But for simplicity, if I run for a specific signature, I will write just that tree to "FunctionName.tree".
+                    // If they want all, they should run without signature.
 
-                    render_tree(&tree, &output_path)?;
+                    let output_path = contract_output_dir.join(format!("{}.tree", function_name));
+
+                    let mut file = fs::File::create(&output_path)?;
+                    file.write_all(content.as_bytes())?;
+
                     println!("Generated tree at: {:?}", output_path);
                 }
                 None => {
-                    // No signature - generate for all overloads
+                    // No signature - generate for all overloads of this function
                     let function_contexts = parser.parse_all_functions(
                         &contract_path,
                         &contract_name,
@@ -201,60 +171,96 @@ fn generate_tree(target: &str, output_dir: &str) -> Result<(), Box<dyn std::erro
                     )?;
 
                     let num_overloads = function_contexts.len();
-                    if num_overloads == 1 {
-                        println!(
-                            "Generating BTT tree for {}::{}",
-                            contract_name, function_name
-                        );
+                    println!(
+                        "Found {} overloads for {}::{}",
+                        num_overloads, contract_name, function_name
+                    );
 
-                        let function_ctx = &function_contexts[0];
-                        println!("Found {} branch points", function_ctx.branch_points.len());
+                    let mut combined_content = String::new();
+                    for (i, function_ctx) in function_contexts.iter().enumerate() {
+                        let root_name = if num_overloads > 1 {
+                            format!("{}({})", function_name, function_ctx.signature)
+                        } else {
+                            function_name.clone()
+                        };
 
                         let tree =
-                            TreeBuilder::build(&function_name, function_ctx.branch_points.clone())?;
+                            TreeBuilder::build(&root_name, function_ctx.branch_points.clone())?;
 
-                        let output_path = std::path::Path::new(output_dir)
-                            .join(format!("{}.{}.tree", contract_name, function_name));
-
-                        render_tree(&tree, &output_path)?;
-                        println!("Generated tree at: {:?}", output_path);
-                    } else {
-                        println!(
-                            "Found {} overloads for {}::{}",
-                            num_overloads, contract_name, function_name
-                        );
-
-                        for function_ctx in function_contexts {
-                            println!(
-                                "Generating tree for {}::{}({}) - {} branch points",
-                                contract_name,
-                                function_name,
-                                function_ctx.signature,
-                                function_ctx.branch_points.len()
-                            );
-
-                            let tree = TreeBuilder::build(
-                                &function_name,
-                                function_ctx.branch_points.clone(),
-                            )?;
-
-                            let output_path = std::path::Path::new(output_dir).join(format!(
-                                "{}.{}({}).tree",
-                                contract_name, function_name, function_ctx.signature
-                            ));
-
-                            render_tree(&tree, &output_path)?;
-                            println!("  -> {:?}", output_path);
+                        if i > 0 {
+                            combined_content.push_str("\n");
                         }
-
-                        println!("Generated {} trees", num_overloads);
+                        combined_content.push_str(&render_to_string(&tree));
                     }
+
+                    let output_path = contract_output_dir.join(format!("{}.tree", function_name));
+                    let mut file = fs::File::create(&output_path)?;
+                    file.write_all(combined_content.as_bytes())?;
+
+                    println!("Generated combined tree at: {:?}", output_path);
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn process_contract(
+    parser: &SolarParser,
+    file_path: &Path,
+    contract_name: &str,
+    output_dir: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let function_contexts = parser.parse_all_public_functions(file_path, contract_name)?;
+
+    if function_contexts.is_empty() {
+        return Ok(0);
+    }
+
+    // Group functions by name
+    let mut func_groups: HashMap<String, Vec<&crate::parser::FunctionContext>> = HashMap::new();
+    for ctx in &function_contexts {
+        func_groups
+            .entry(ctx.function_name.clone())
+            .or_default()
+            .push(ctx);
+    }
+
+    let contract_snake = to_snake_case(contract_name);
+    let contract_output_dir = Path::new(output_dir).join(contract_snake);
+    fs::create_dir_all(&contract_output_dir)?;
+
+    let mut generated_count = 0;
+
+    for (func_name, contexts) in func_groups {
+        let mut combined_content = String::new();
+        let is_overloaded = contexts.len() > 1;
+
+        // Use the order from contexts, which is deterministic based on parser output (order of definition)
+        for (i, ctx) in contexts.iter().enumerate() {
+            let root_name = if is_overloaded {
+                format!("{}({})", func_name, ctx.signature)
+            } else {
+                func_name.clone()
+            };
+
+            let tree = TreeBuilder::build(&root_name, ctx.branch_points.clone())?;
+            if i > 0 {
+                combined_content.push_str("\n");
+            }
+            combined_content.push_str(&render_to_string(&tree));
+        }
+
+        let output_path = contract_output_dir.join(format!("{}.tree", func_name));
+        let mut file = fs::File::create(&output_path)?;
+        file.write_all(combined_content.as_bytes())?;
+
+        println!("  -> {:?}", output_path);
+        generated_count += 1;
+    }
+
+    Ok(generated_count)
 }
 
 fn parse_target(target: &str) -> ParsedTarget {
@@ -292,5 +298,46 @@ fn parse_target(target: &str) -> ParsedTarget {
         ParsedTarget::Contract {
             contract_name: target.to_string(),
         }
+    }
+}
+
+/// Convert CamelCase to snake_case
+/// strictness: new word on first uppercase or uppercase preceded by lowercase
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            // Add underscore if:
+            // 1. It's not the first character
+            // 2. The previous character is lowercase
+            if i > 0 {
+                let prev = chars[i - 1];
+                if prev.is_lowercase() {
+                    result.push('_');
+                }
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_snake_case() {
+        assert_eq!(to_snake_case("Vault"), "vault");
+        assert_eq!(to_snake_case("VaultABC"), "vault_abc");
+        assert_eq!(to_snake_case("HiHello"), "hi_hello");
+        assert_eq!(to_snake_case("myFunction"), "my_function"); // Note: standard conversion, but contract names are usually CapWords
+        assert_eq!(to_snake_case("ABC"), "abc");
+        assert_eq!(to_snake_case("A"), "a");
     }
 }
