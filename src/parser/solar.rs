@@ -791,6 +791,7 @@ impl<'a> SolarParser<'a> {
             // require(condition, message) or require(condition)
             Expr(expr) => {
                 if let Call(callee, args) = &expr.kind {
+                    // Handle require/assert
                     if let Ident(ident) = &callee.kind {
                         let name = ident.as_str();
                         if name == "require" || name == "assert" {
@@ -807,6 +808,42 @@ impl<'a> SolarParser<'a> {
                                     });
                                 }
                             }
+                        }
+                    }
+
+                    // Handle external calls via library methods or native calls
+                    // Case 1: Member calls like Address.sendValue(), token.transfer()
+                    if let Member(base, member) = &callee.kind {
+                        let method_name = member.as_str();
+
+                        // List of methods that imply external calls and potential reverts
+                        let external_methods = [
+                            // Address library
+                            "sendValue",
+                            "functionCall",
+                            "functionCallWithValue",
+                            // SafeERC20 / ERC20
+                            "safeTransfer",
+                            "safeTransferFrom",
+                            "safeApprove",
+                            "safeIncreaseAllowance",
+                            "safeDecreaseAllowance",
+                            "transfer",
+                            "transferFrom",
+                            "approve",
+                        ];
+
+                        if external_methods.contains(&method_name) {
+                            let obj_name = self.expr_to_string(base);
+                            let call_desc = format!("{}.{}", obj_name, method_name);
+
+                            branch_points.push(BranchPoint {
+                                condition: ConditionExpr::ExternalCall(call_desc),
+                                context: ConditionContext::External,
+                                is_loop: in_loop,
+                                is_external_call: true,
+                                is_if_revert: false,
+                            });
                         }
                     }
                 }

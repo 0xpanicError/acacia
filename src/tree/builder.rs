@@ -76,13 +76,13 @@ impl TreeBuilder {
 
             return vec![
                 TreeNode::Branch {
-                    label: format!("given {} fails", call_name),
+                    label: format!("when {} fails", call_name),
                     children: vec![TreeNode::Leaf {
                         label: "it should revert".to_string(),
                     }],
                 },
                 TreeNode::Branch {
-                    label: format!("given {} succeeds", call_name),
+                    label: format!("when {} succeeds", call_name),
                     children: Self::build_branches(branch_points, index + 1, labeler),
                 },
             ];

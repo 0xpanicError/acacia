@@ -1,12 +1,5 @@
-mod analysis;
-mod cli;
-mod foundry;
-mod output;
-mod parser;
-mod tree;
-
 use clap::Parser;
-use cli::Cli;
+use acacia::cli::Cli;
 
 fn main() {
     let cli = Cli::parse();
@@ -16,3 +9,4 @@ fn main() {
         std::process::exit(1);
     }
 }
+

@@ -54,3 +54,29 @@ pub enum BinaryOp {
     Lt,
     Lte,
 }
+
+impl std::fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BinaryOp::Eq => write!(f, "=="),
+            BinaryOp::NotEq => write!(f, "!="),
+            BinaryOp::Gt => write!(f, ">"),
+            BinaryOp::Gte => write!(f, ">="),
+            BinaryOp::Lt => write!(f, "<"),
+            BinaryOp::Lte => write!(f, "<="),
+        }
+    }
+}
+
+impl std::fmt::Display for ConditionExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConditionExpr::Binary { left, op, right } => write!(f, "{} {} {}", left, op, right),
+            ConditionExpr::Not(inner) => write!(f, "!({})", inner),
+            ConditionExpr::And(left, right) => write!(f, "({}) && ({})", left, right),
+            ConditionExpr::Or(left, right) => write!(f, "({}) || ({})", left, right),
+            ConditionExpr::Ident(s) => write!(f, "{}", s),
+            ConditionExpr::ExternalCall(s) => write!(f, "{}", s),
+        }
+    }
+}

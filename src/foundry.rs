@@ -42,10 +42,10 @@ struct DefaultProfile {
 
 #[derive(Debug)]
 pub struct FoundryProject {
-    root: PathBuf,
-    src_dir: PathBuf,
-    lib_dirs: Vec<PathBuf>,
-    remappings: Vec<(String, String)>,
+    pub root: PathBuf,
+    pub src_dir: PathBuf,
+    pub lib_dirs: Vec<PathBuf>,
+    pub remappings: Vec<(String, String)>,
 }
 
 impl FoundryProject {
