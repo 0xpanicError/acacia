@@ -811,40 +811,20 @@ impl<'a> SolarParser<'a> {
                         }
                     }
 
-                    // Handle external calls via library methods or native calls
-                    // Case 1: Member calls like Address.sendValue(), token.transfer()
+                    // Handle ALL external calls (member function calls on objects)
+                    // This includes contract calls, library calls, and low-level calls
                     if let Member(base, member) = &callee.kind {
                         let method_name = member.as_str();
+                        let obj_name = self.expr_to_string(base);
+                        let call_desc = format!("{}.{}", obj_name, method_name);
 
-                        // List of methods that imply external calls and potential reverts
-                        let external_methods = [
-                            // Address library
-                            "sendValue",
-                            "functionCall",
-                            "functionCallWithValue",
-                            // SafeERC20 / ERC20
-                            "safeTransfer",
-                            "safeTransferFrom",
-                            "safeApprove",
-                            "safeIncreaseAllowance",
-                            "safeDecreaseAllowance",
-                            "transfer",
-                            "transferFrom",
-                            "approve",
-                        ];
-
-                        if external_methods.contains(&method_name) {
-                            let obj_name = self.expr_to_string(base);
-                            let call_desc = format!("{}.{}", obj_name, method_name);
-
-                            branch_points.push(BranchPoint {
-                                condition: ConditionExpr::ExternalCall(call_desc),
-                                context: ConditionContext::External,
-                                is_loop: in_loop,
-                                is_external_call: true,
-                                is_if_revert: false,
-                            });
-                        }
+                        branch_points.push(BranchPoint {
+                            condition: ConditionExpr::ExternalCall(call_desc),
+                            context: ConditionContext::External,
+                            is_loop: in_loop,
+                            is_external_call: true,
+                            is_if_revert: false,
+                        });
                     }
                 }
             }
@@ -1025,10 +1005,27 @@ impl<'a> SolarParser<'a> {
                 format!("{}(...)", self.expr_to_string(callee))
             }
             Binary(left, op, right) => {
+                use ast::BinOpKind::*;
+                let op_str = match op.kind {
+                    Add => "+",
+                    Sub => "-",
+                    Mul => "*",
+                    Div => "/",
+                    Mod => "%",
+                    // Comparison and logical operators are handled by the labeler
+                    _ => {
+                        return format!(
+                            "{} {:?} {}",
+                            self.expr_to_string(left),
+                            op.kind,
+                            self.expr_to_string(right)
+                        )
+                    }
+                };
                 format!(
-                    "{} {:?} {}",
+                    "{} {} {}",
                     self.expr_to_string(left),
-                    op.kind,
+                    op_str,
                     self.expr_to_string(right)
                 )
             }
